@@ -176,6 +176,8 @@ func main() {
 	root.AddCommand(deploy.Endpoints(ctx, k8sLogger))
 	root.AddCommand(logs.Logs(ctx, k8sLogger))
 	root.AddCommand(generateFigSpec.NewCmdGenFigSpec())
+	root.AddCommand(cmd.GenerateSchema())
+	root.AddCommand(cmd.Validate())
 
 	// deprecated
 	root.AddCommand(cmd.Create(ctx))

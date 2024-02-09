@@ -206,7 +206,9 @@ require (
 require (
 	github.com/depot/depot-go v0.2.0
 	github.com/hashicorp/go-multierror v1.1.1
+	github.com/invopop/jsonschema v0.12.0
 	github.com/samber/slog-logrus/v2 v2.1.0
+	github.com/xeipuuv/gojsonschema v1.2.0
 	istio.io/api v0.0.0-20221013011440-bc935762d2b9
 	istio.io/client-go v1.15.3
 )
@@ -219,7 +221,9 @@ require (
 	cloud.google.com/go/iam v1.1.1 // indirect
 	dario.cat/mergo v1.0.0 // indirect
 	github.com/Microsoft/hcsshim v0.11.4 // indirect
+	github.com/bahlo/generic-list-go v0.2.0 // indirect
 	github.com/bufbuild/connect-go v1.7.0 // indirect
+	github.com/buger/jsonparser v1.1.1 // indirect
 	github.com/cloudflare/circl v1.3.7 // indirect
 	github.com/containerd/log v0.1.0 // indirect
 	github.com/containerd/typeurl/v2 v2.1.1 // indirect
@@ -237,6 +241,9 @@ require (
 	github.com/samber/lo v1.38.1 // indirect
 	github.com/samber/slog-common v0.11.0 // indirect
 	github.com/skeema/knownhosts v1.2.1 // indirect
+	github.com/wk8/go-ordered-map/v2 v2.1.8 // indirect
+	github.com/xeipuuv/gojsonpointer v0.0.0-20190905194746-02993c407bfb // indirect
+	github.com/xeipuuv/gojsonreference v0.0.0-20180127040603-bd5ef7bd5415 // indirect
 	go.opentelemetry.io/otel/metric v1.19.0 // indirect
 	golang.org/x/exp v0.0.0-20230522175609-2e198f4a06a1 // indirect
 	golang.org/x/mod v0.12.0 // indirect
