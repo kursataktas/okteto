@@ -16,7 +16,6 @@ package model
 import (
 	"errors"
 	"fmt"
-	"github.com/invopop/jsonschema"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -28,6 +27,7 @@ import (
 
 	"github.com/compose-spec/godotenv"
 	"github.com/google/uuid"
+	"github.com/invopop/jsonschema"
 	"github.com/okteto/okteto/pkg/build"
 	"github.com/okteto/okteto/pkg/constants"
 	"github.com/okteto/okteto/pkg/env"
@@ -300,10 +300,6 @@ func (Services) JSONSchemaExtend(schema *jsonschema.Schema) {
 	fmt.Println("JSONSchemaExtend", schema)
 }
 
-//	func (Services) JSONSchemaAlias() any {
-//		fmt.Println("JSONSchemaAlias")
-//		return Dev{}
-//	}
 func (Services) JSONSchemaProperty(prop string) {
 	fmt.Println("JSONSchemaProperty:", prop)
 }
