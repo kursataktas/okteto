@@ -70,7 +70,7 @@ func GetContextResource(path string) (*ContextResource, error) {
 		return nil, err
 	}
 	if err := yaml.Unmarshal(bytes, ctxResource); err != nil {
-		return nil, newManifestFriendlyError(err)
+		return nil, NewManifestFriendlyError(err)
 	}
 
 	displayDeprecationWarningForContextAndNamespace(ctxResource.Context, ctxResource.Namespace)
