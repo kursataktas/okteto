@@ -63,11 +63,21 @@ type OktetoBuilderInterface interface {
 type OktetoBuilder struct {
 	OktetoContext OktetoContextInterface
 	Fs            afero.Fs
+	isRetry       bool
 }
 
 // OktetoRegistryInterface checks if an image is at the registry
 type OktetoRegistryInterface interface {
 	GetImageTagWithDigest(imageTag string) (string, error)
+}
+
+// NewOktetoBuilder creates a new instance of OktetoBuilder.
+// It takes an OktetoContextInterface and afero.Fs as parameters and returns a pointer to OktetoBuilder.
+func NewOktetoBuilder(context OktetoContextInterface, fs afero.Fs) *OktetoBuilder {
+	return &OktetoBuilder{
+		OktetoContext: context,
+		Fs:            fs,
+	}
 }
 
 func (ob *OktetoBuilder) GetBuilder() string {
@@ -76,29 +86,35 @@ func (ob *OktetoBuilder) GetBuilder() string {
 
 // Run runs the build sequence
 func (ob *OktetoBuilder) Run(ctx context.Context, buildOptions *types.BuildOptions, ioCtrl *io.Controller) error {
+	isDeployOrDestroy := buildOptions.OutputMode == DeployOutputModeOnBuild || buildOptions.OutputMode == DestroyOutputModeOnBuild
 	buildOptions.OutputMode = setOutputMode(buildOptions.OutputMode)
 	depotToken := os.Getenv(DepotTokenEnvVar)
 	depotProject := os.Getenv(DepotProjectEnvVar)
 
-	builder := ob.GetBuilder()
-	buildMsg := fmt.Sprintf("Building '%s'", buildOptions.File)
-	depotEnabled := isDepotEnabled(depotProject, depotToken)
-	if depotEnabled {
-		ioCtrl.Out().Infof("%s on depot's machine...", buildMsg)
-	} else if builder == "" {
-		ioCtrl.Out().Infof("%s using your local docker daemon", buildMsg)
-	} else {
-		ioCtrl.Out().Infof("%s in %s...", buildMsg, builder)
+	if !isDeployOrDestroy {
+		builder := ob.GetBuilder()
+		buildMsg := fmt.Sprintf("Building '%s'", buildOptions.File)
+		depotEnabled := IsDepotEnabled()
+		if depotEnabled {
+			ioCtrl.Out().Infof("%s on depot's machine...", buildMsg)
+		} else if builder == "" {
+			ioCtrl.Out().Infof("%s using your local docker daemon", buildMsg)
+		} else {
+			ioCtrl.Out().Infof("%s in %s...", buildMsg, builder)
+		}
 	}
 
 	switch {
-	case isDepotEnabled(depotProject, depotToken):
+	// When depot is available we only go to depot if it's not a deploy or a destroy.
+	// On depot the workload id is not working correctly and the users would not be able to
+	// use the internal cluster ip as if they were running their scripts on the k8s cluster
+	case IsDepotEnabled() && !isDeployOrDestroy:
 		depotManager := newDepotBuilder(depotProject, depotToken, ob.OktetoContext, ioCtrl)
-		return depotManager.Run(ctx, buildOptions, runAndHandleBuild)
+		return depotManager.Run(ctx, buildOptions, solveBuild)
 	case ob.OktetoContext.GetCurrentBuilder() == "":
 		return ob.buildWithDocker(ctx, buildOptions)
 	default:
-		return ob.buildWithOkteto(ctx, buildOptions, ioCtrl, runAndHandleBuild)
+		return ob.buildWithOkteto(ctx, buildOptions, ioCtrl, solveBuild)
 	}
 }
 
@@ -161,7 +177,30 @@ func (ob *OktetoBuilder) buildWithOkteto(ctx context.Context, buildOptions *type
 		return err
 	}
 
-	return run(ctx, buildkitClient, opt, buildOptions, ob.OktetoContext, ioCtrl)
+	err = run(ctx, buildkitClient, opt, buildOptions.OutputMode, ioCtrl)
+	if err != nil {
+		if shouldRetryBuild(err, buildOptions.Tag, ob.OktetoContext) {
+			ioCtrl.Logger().Infof("Failed to build image: %s", err.Error())
+			ioCtrl.Logger().Infof("isRetry: %t", ob.isRetry)
+			if !ob.isRetry {
+				retryBuilder := NewOktetoBuilder(ob.OktetoContext, ob.Fs)
+				retryBuilder.isRetry = true
+				err = retryBuilder.buildWithOkteto(ctx, buildOptions, ioCtrl, run)
+			}
+		}
+		err = getErrorMessage(err, buildOptions.Tag)
+		return err
+	}
+
+	var tag string
+	if buildOptions != nil {
+		tag = buildOptions.Tag
+		if buildOptions.Manifest != nil && buildOptions.Manifest.Deploy != nil {
+			tag = buildOptions.Manifest.Deploy.Image
+		}
+	}
+	err = getErrorMessage(err, tag)
+	return err
 }
 
 // https://github.com/docker/cli/blob/56e5910181d8ac038a634a203a4f3550bb64991f/cli/command/image/build.go#L209
@@ -249,9 +288,6 @@ func OptsFromBuildInfo(manifestName, svcName string, b *build.Info, o *types.Bui
 			targetRegistry = constants.GlobalRegistry
 		}
 		b.Image = fmt.Sprintf("%s/%s-%s:%s", targetRegistry, sanitizedName, svcName, model.OktetoDefaultImageTag)
-		if len(b.VolumesToInclude) > 0 {
-			b.Image = fmt.Sprintf("%s/%s-%s:%s", targetRegistry, sanitizedName, svcName, model.OktetoImageTagWithVolumes)
-		}
 	}
 
 	file := b.Dockerfile

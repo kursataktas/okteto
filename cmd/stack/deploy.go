@@ -26,6 +26,7 @@ import (
 	"github.com/okteto/okteto/pkg/analytics"
 	"github.com/okteto/okteto/pkg/cmd/stack"
 	"github.com/okteto/okteto/pkg/constants"
+	"github.com/okteto/okteto/pkg/divert"
 	"github.com/okteto/okteto/pkg/env"
 	oktetoLog "github.com/okteto/okteto/pkg/log"
 	"github.com/okteto/okteto/pkg/log/io"
@@ -40,14 +41,16 @@ import (
 // DeployCommand has all the namespaces subcommands
 type DeployCommand struct {
 	K8sClient        kubernetes.Interface
-	analyticsTracker analyticsTrackerInterface
+	analyticsTracker buildTrackerInterface
+	insights         buildTrackerInterface
 	Config           *rest.Config
 	ioCtrl           *io.Controller
+	DivertDriver     divert.Driver
 	IsInsideDeploy   bool
 }
 
 // deploy deploys a stack
-func deploy(ctx context.Context, at analyticsTrackerInterface, ioCtrl *io.Controller) *cobra.Command {
+func deploy(ctx context.Context, at, insights buildTrackerInterface, ioCtrl *io.Controller) *cobra.Command {
 	options := &stack.DeployOptions{}
 
 	cmd := &cobra.Command{
@@ -77,7 +80,9 @@ func deploy(ctx context.Context, at analyticsTrackerInterface, ioCtrl *io.Contro
 				K8sClient:        c,
 				Config:           config,
 				analyticsTracker: at,
+				insights:         insights,
 				ioCtrl:           ioCtrl,
+				DivertDriver:     divert.NewNoop(),
 			}
 			return dc.RunDeploy(ctx, s, options)
 		},
@@ -127,6 +132,8 @@ func (c *DeployCommand) RunDeploy(ctx context.Context, s *model.Stack, options *
 		Config:           c.Config,
 		AnalyticsTracker: c.analyticsTracker,
 		IoCtrl:           c.ioCtrl,
+		Divert:           c.DivertDriver,
+		Insights:         c.insights,
 	}
 	err := stackDeployer.Deploy(ctx, s, options)
 

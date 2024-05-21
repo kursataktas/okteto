@@ -23,6 +23,7 @@ import (
 	dockertypes "github.com/docker/cli/cli/config/types"
 	dockercredentials "github.com/docker/docker-credential-helpers/credentials"
 	"github.com/okteto/okteto/pkg/constants"
+	"github.com/okteto/okteto/pkg/env"
 	oktetoErrors "github.com/okteto/okteto/pkg/errors"
 	"github.com/okteto/okteto/pkg/types"
 	"github.com/shurcooL/graphql"
@@ -76,7 +77,7 @@ func TestGetContext(t *testing.T) {
 							GlobalNamespace: "globalNs",
 							Analytics:       false,
 						},
-						Secrets: []secretQuery{
+						PlatformVariables: []variablesQuery{
 							{
 								Name:  "name",
 								Value: "value",
@@ -107,7 +108,7 @@ func TestGetContext(t *testing.T) {
 						GlobalNamespace: "globalNs",
 						Analytics:       false,
 					},
-					Secrets: []types.Secret{
+					PlatformVariables: []env.Var{
 						{
 							Name:  "name",
 							Value: "value",
@@ -142,7 +143,7 @@ func TestGetContext(t *testing.T) {
 							GlobalNamespace: "",
 							Analytics:       false,
 						},
-						Secrets: []secretQuery{
+						PlatformVariables: []variablesQuery{
 							{
 								Name:  "name",
 								Value: "value",
@@ -173,7 +174,7 @@ func TestGetContext(t *testing.T) {
 						GlobalNamespace: constants.DefaultGlobalNamespace,
 						Analytics:       false,
 					},
-					Secrets: []types.Secret{
+					PlatformVariables: []env.Var{
 						{
 							Name:  "name",
 							Value: "value",
@@ -241,13 +242,13 @@ func TestGetContext(t *testing.T) {
 	}
 }
 
-func TestGetUserSecrets(t *testing.T) {
+func TestGetOktetoPlatformVariables(t *testing.T) {
 	type input struct {
 		client *fakeGraphQLClient
 	}
 	type expected struct {
-		err         error
-		userSecrets []types.Secret
+		err               error
+		platformVariables []env.Var
 	}
 	testCases := []struct {
 		cfg      input
@@ -262,16 +263,16 @@ func TestGetUserSecrets(t *testing.T) {
 				},
 			},
 			expected: expected{
-				userSecrets: nil,
-				err:         assert.AnError,
+				platformVariables: nil,
+				err:               assert.AnError,
 			},
 		},
 		{
-			name: "query get user secrets",
+			name: "query get okteto platform variables",
 			cfg: input{
 				client: &fakeGraphQLClient{
-					queryResult: &getSecretsQuery{
-						Secrets: []secretQuery{
+					queryResult: &getVariablesQuery{
+						Variables: []variablesQuery{
 							{
 								Name:  "password",
 								Value: "test",
@@ -285,7 +286,7 @@ func TestGetUserSecrets(t *testing.T) {
 				},
 			},
 			expected: expected{
-				userSecrets: []types.Secret{
+				platformVariables: []env.Var{
 					{
 						Name:  "password",
 						Value: "test",
@@ -301,111 +302,9 @@ func TestGetUserSecrets(t *testing.T) {
 			uc := &userClient{
 				client: tc.cfg.client,
 			}
-			userSecrets, err := uc.GetUserSecrets(ctx)
+			vars, err := uc.GetOktetoPlatformVariables(ctx)
 			assert.ErrorIs(t, err, tc.expected.err)
-			assert.Equal(t, tc.expected.userSecrets, userSecrets)
-		})
-	}
-}
-
-func TestGetDeprecatedContext(t *testing.T) {
-	type input struct {
-		client *fakeGraphQLClient
-	}
-	type expected struct {
-		userContext *types.UserContext
-		err         error
-	}
-	testCases := []struct {
-		expected expected
-		cfg      input
-		name     string
-	}{
-		{
-			name: "error in graphql",
-			cfg: input{
-				client: &fakeGraphQLClient{
-					err: assert.AnError,
-				},
-			},
-			expected: expected{
-				userContext: nil,
-				err:         assert.AnError,
-			},
-		},
-		{
-			name: "graphql response is an action",
-			cfg: input{
-				client: &fakeGraphQLClient{
-					queryResult: &getDeprecatedContextQuery{
-						User: deprecatedUserQuery{
-							Id:          "id",
-							Name:        "name",
-							Namespace:   "ns",
-							Email:       "email",
-							ExternalID:  "externalID",
-							Token:       "token",
-							New:         false,
-							Registry:    "registry.com",
-							Buildkit:    "buildkit.com",
-							Certificate: "cert",
-						},
-						Secrets: []secretQuery{
-							{
-								Name:  "name",
-								Value: "value",
-							},
-						},
-						Cred: credQuery{
-							Server:      "my-server.com",
-							Certificate: "cert",
-							Token:       "token",
-							Namespace:   "ns",
-						},
-					},
-				},
-			},
-			expected: expected{
-				userContext: &types.UserContext{
-					User: types.User{
-						ID:              "id",
-						Name:            "name",
-						Namespace:       "ns",
-						Email:           "email",
-						ExternalID:      "externalID",
-						Token:           "token",
-						New:             false,
-						Registry:        "registry.com",
-						Buildkit:        "buildkit.com",
-						Certificate:     "cert",
-						GlobalNamespace: constants.DefaultGlobalNamespace,
-						Analytics:       true,
-					},
-					Secrets: []types.Secret{
-						{
-							Name:  "name",
-							Value: "value",
-						},
-					},
-					Credentials: types.Credential{
-						Server:      "my-server.com",
-						Certificate: "cert",
-						Token:       "token",
-						Namespace:   "ns",
-					},
-				},
-				err: nil,
-			},
-		},
-	}
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			uc := &userClient{
-				client: tc.cfg.client,
-			}
-			userContext, err := uc.deprecatedGetUserContext(context.Background())
-			assert.ErrorIs(t, err, tc.expected.err)
-			assert.Equal(t, tc.expected.userContext, userContext)
+			assert.Equal(t, tc.expected.platformVariables, vars)
 		})
 	}
 }

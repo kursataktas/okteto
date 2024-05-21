@@ -61,7 +61,7 @@ func getSolveOpt(buildOptions *types.BuildOptions, okctx OktetoContextInterface,
 
 	imageCtrl := registry.NewImageCtrl(GetRegistryConfigFromOktetoConfig(okctx))
 	if okctx.IsOkteto() {
-		buildOptions.DevTag = imageCtrl.ExpandOktetoDevRegistry(registry.GetDevTagFromGlobal(buildOptions.Tag))
+		buildOptions.DevTag = imageCtrl.ExpandOktetoDevRegistry(imageCtrl.GetDevTagFromGlobal(buildOptions.Tag))
 		buildOptions.Tag = imageCtrl.ExpandOktetoDevRegistry(buildOptions.Tag)
 		buildOptions.Tag = imageCtrl.ExpandOktetoGlobalRegistry(buildOptions.Tag)
 		for i := range buildOptions.CacheFrom {
@@ -364,12 +364,8 @@ func solveBuild(ctx context.Context, c *client.Client, opt *client.SolveOpt, pro
 			// We need to wait until the tty channel is closed to avoid writing to stdout while the tty is being used
 			_, err := progressui.DisplaySolveStatus(context.TODO(), c, ioCtrl.Out(), ttyChannel)
 			return err
-		case "deploy":
-			err := deployDisplayer(context.TODO(), plainChannel, &types.BuildOptions{OutputMode: "deploy"})
-			commandFailChannel <- err
-			return err
-		case "destroy":
-			err := deployDisplayer(context.TODO(), plainChannel, &types.BuildOptions{OutputMode: "destroy"})
+		case DeployOutputModeOnBuild, DestroyOutputModeOnBuild:
+			err := deployDisplayer(context.TODO(), plainChannel, &types.BuildOptions{OutputMode: progress})
 			commandFailChannel <- err
 			return err
 		default:
@@ -395,56 +391,29 @@ func solveBuild(ctx context.Context, c *client.Client, opt *client.SolveOpt, pro
 	return nil
 }
 
-func runAndHandleBuild(ctx context.Context, c *client.Client, opt *client.SolveOpt, buildOptions *types.BuildOptions, okCtx OktetoContextInterface, ioCtrl *io.Controller) error {
-	err := solveBuild(ctx, c, opt, buildOptions.OutputMode, ioCtrl)
-	if err != nil {
-		oktetoLog.Infof("Failed to build image: %s", err.Error())
-	}
+func shouldRetryBuild(err error, tag string, okCtx OktetoContextInterface) bool {
 	if isTransientError(err) {
 		oktetoLog.Yellow(`Failed to push '%s' to the registry:
   %s,
-  Retrying ...`, buildOptions.Tag, err.Error())
-		success := true
-		err := solveBuild(ctx, c, opt, buildOptions.OutputMode, ioCtrl)
-		if err != nil {
-			success = false
-			oktetoLog.Infof("Failed to build image: %s", err.Error())
-		}
-		err = getErrorMessage(err, buildOptions.Tag)
-		analytics.TrackBuildTransientError(success)
-		return err
+  Retrying...`, tag, err.Error())
+		analytics.TrackBuildTransientError(true)
+		return true
 	}
 
-	if err == nil && buildOptions.Tag != "" {
-		tags := strings.Split(buildOptions.Tag, ",")
+	if err == nil && tag != "" {
+		tags := strings.Split(tag, ",")
 		reg := registry.NewOktetoRegistry(GetRegistryConfigFromOktetoConfig(okCtx))
 		for _, tag := range tags {
 			if _, err := reg.GetImageTagWithDigest(tag); err != nil {
 				oktetoLog.Yellow(`Failed to push '%s' metadata to the registry:
 	  %s,
-	  Retrying ...`, buildOptions.Tag, err.Error())
-				success := true
-				err := solveBuild(ctx, c, opt, buildOptions.OutputMode, ioCtrl)
-				if err != nil {
-					success = false
-					oktetoLog.Infof("Failed to build image: %s", err.Error())
-				}
-				err = getErrorMessage(err, buildOptions.Tag)
-				analytics.TrackBuildPullError(success)
-				return err
+	  Retrying...`, tag, err.Error())
+				analytics.TrackBuildPullError(true)
+				return true
 			}
 		}
 	}
-
-	var tag string
-	if buildOptions != nil {
-		tag = buildOptions.Tag
-		if buildOptions.Manifest != nil && buildOptions.Manifest.Deploy != nil {
-			tag = buildOptions.Manifest.Deploy.Image
-		}
-	}
-	err = getErrorMessage(err, tag)
-	return err
+	return false
 }
 
 func (*buildWriter) Write(p []byte) (int, error) {

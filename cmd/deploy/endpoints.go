@@ -80,7 +80,7 @@ func NewEndpointGetter(k8sLogger *io.K8sLogger) (EndpointGetter, error) {
 
 }
 
-// Endpoints deploys the okteto manifest
+// Endpoints lists the endpoints for a development environment
 func Endpoints(ctx context.Context, k8sLogger *io.K8sLogger) *cobra.Command {
 	options := &EndpointsOptions{}
 	fs := afero.NewOsFs()
@@ -107,6 +107,9 @@ func Endpoints(ctx context.Context, k8sLogger *io.K8sLogger) *cobra.Command {
 			showCtxHeader := options.Output == ""
 			// Loads, updates and uses the context from path. If not found, it creates and uses a new context
 			if err := contextCMD.LoadContextFromPath(ctx, options.Namespace, options.K8sContext, options.ManifestPath, contextCMD.Options{Show: showCtxHeader}); err != nil {
+				if err.Error() == fmt.Errorf(oktetoErrors.ErrNotLogged, okteto.GetContext().Name).Error() {
+					return err
+				}
 				if err := contextCMD.NewContextCommand().Run(ctx, &contextCMD.Options{Namespace: options.Namespace, Show: showCtxHeader}); err != nil {
 					return err
 				}
@@ -264,7 +267,7 @@ func (dc *EndpointGetter) showEndpoints(ctx context.Context, opts *EndpointsOpti
 		}
 	default:
 		if len(eps) == 0 {
-			oktetoLog.Information("There are no available endpoints for '%s'.\n    Follow this link to know more about how to create public endpoints for your application:\n    https://www.okteto.com/docs/core/ingress/automatic-ssl", opts.Name)
+			oktetoLog.Information("There are no available endpoints for '%s'.\n    Follow this link to know more about how to create public endpoints for your application:\n    https://www.okteto.com/docs/core/endpoints/automatic-ssl", opts.Name)
 		} else {
 			oktetoLog.Information("Endpoints available:")
 			oktetoLog.Printf("  - %s\n", strings.Join(eps, "\n  - "))

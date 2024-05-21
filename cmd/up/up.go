@@ -65,7 +65,7 @@ import (
 const (
 	ReconnectingMessage = "Trying to reconnect to your cluster. File synchronization will automatically resume when the connection improves."
 
-	composeVolumesUrl = "https://www.okteto.com/docs/reference/compose/#volumes-string-optional"
+	composeVolumesUrl = "https://www.okteto.com/docs/reference/docker-compose/#volumes-string-optional"
 )
 
 var (
@@ -92,12 +92,12 @@ type Options struct {
 }
 
 // Up starts a development container
-func Up(at analyticsTrackerInterface, ioCtrl *io.Controller, k8sLogger *io.K8sLogger) *cobra.Command {
+func Up(at analyticsTrackerInterface, insights buildTrackerInterface, ioCtrl *io.Controller, k8sLogger *io.K8sLogger) *cobra.Command {
 	upOptions := &Options{}
 	cmd := &cobra.Command{
 		Use:   "up [service]",
 		Short: "Deploy your development environment",
-		Args:  utils.MaximumNArgsAccepted(1, "https://okteto.com/docs/reference/cli/#up"),
+		Args:  utils.MaximumNArgsAccepted(1, "https://okteto.com/docs/reference/okteto-cli/#up"),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if okteto.InDevContainer() {
 				return oktetoErrors.ErrNotInDevContainer
@@ -253,6 +253,11 @@ func Up(at analyticsTrackerInterface, ioCtrl *io.Controller, k8sLogger *io.K8sLo
 				}
 			}
 
+			onBuildFinish := []buildv2.OnBuildFinish{
+				at.TrackImageBuild,
+				insights.TrackImageBuild,
+			}
+
 			up := &upContext{
 				Manifest:          oktetoManifest,
 				Dev:               nil,
@@ -266,7 +271,7 @@ func Up(at analyticsTrackerInterface, ioCtrl *io.Controller, k8sLogger *io.K8sLo
 				analyticsMeta:     upMeta,
 				K8sClientProvider: okteto.NewK8sClientProviderWithLogger(k8sLogger),
 				tokenUpdater:      newTokenUpdaterController(),
-				builder:           buildv2.NewBuilderFromScratch(at, ioCtrl),
+				builder:           buildv2.NewBuilderFromScratch(ioCtrl, onBuildFinish),
 			}
 			up.inFd, up.isTerm = term.GetFdInfo(os.Stdin)
 			if up.isTerm {
@@ -433,7 +438,7 @@ func Up(at analyticsTrackerInterface, ioCtrl *io.Controller, k8sLogger *io.K8sLo
 func (o *Options) AddArgs(cmd *cobra.Command, args []string) error {
 
 	maxV1Args := 1
-	docsURL := "https://okteto.com/docs/reference/cli/#up"
+	docsURL := "https://okteto.com/docs/reference/okteto-cli/#up"
 	if len(args) > maxV1Args {
 		if err := cmd.Help(); err != nil {
 			oktetoLog.Infof("could not show help: %s", err)
@@ -552,7 +557,7 @@ func getOverridedEnvVarsFromCmd(manifestEnvVars env.Environment, commandEnvVaria
 		kv := strings.SplitN(v, "=", varsLength)
 		if len(kv) != varsLength {
 			if kv[0] == "" {
-				return nil, fmt.Errorf("invalid variable value '%s': please review the accepted formats at https://www.okteto.com/docs/reference/manifest/#environment-string-optional ", v)
+				return nil, fmt.Errorf("invalid variable value '%s': please review the accepted formats at https://www.okteto.com/docs/reference/okteto-manifest/#environment-string-optional ", v)
 			}
 			kv = append(kv, os.Getenv(kv[0]))
 		}
@@ -585,23 +590,21 @@ func (up *upContext) deployApp(ctx context.Context, ioCtrl *io.Controller, k8slo
 		return err
 	}
 	c := &deploy.Command{
-		GetManifest:        up.getManifest,
-		GetDeployer:        deploy.GetDeployer,
-		TempKubeconfigFile: deploy.GetTempKubeConfigFile(up.Manifest.Name),
-		K8sClientProvider:  k8sProvider,
-		Builder:            up.builder,
-		GetExternalControl: deploy.NewDeployExternalK8sControl,
-		Fs:                 up.Fs,
-		CfgMapHandler:      deploy.NewConfigmapHandler(k8sProvider, k8slogger),
-		PipelineCMD:        pc,
-		DeployWaiter:       deploy.NewDeployWaiter(k8sProvider, k8slogger),
-		EndpointGetter:     deploy.NewEndpointGetter,
-		AnalyticsTracker:   up.analyticsTracker,
-		IoCtrl:             ioCtrl,
+		GetManifest:       up.getManifest,
+		GetDeployer:       deploy.GetDeployer,
+		K8sClientProvider: k8sProvider,
+		Builder:           up.builder,
+		Fs:                up.Fs,
+		CfgMapHandler:     deploy.NewConfigmapHandler(k8sProvider, k8slogger),
+		PipelineCMD:       pc,
+		DeployWaiter:      deploy.NewDeployWaiter(k8sProvider, k8slogger),
+		EndpointGetter:    deploy.NewEndpointGetter,
+		AnalyticsTracker:  up.analyticsTracker,
+		IoCtrl:            ioCtrl,
 	}
 
 	startTime := time.Now()
-	err = c.RunDeploy(ctx, &deploy.Options{
+	err = c.Run(ctx, &deploy.Options{
 		Name:             up.Manifest.Name,
 		ManifestPathFlag: up.Options.ManifestPathFlag,
 		ManifestPath:     up.Options.ManifestPath,
@@ -615,6 +618,10 @@ func (up *upContext) deployApp(ctx context.Context, ioCtrl *io.Controller, k8slo
 		isRemote = up.Manifest.Deploy.Image != ""
 	}
 
+	// We keep DeprecatedOktetoCurrentDeployBelongsToPreviewEnvVar for backward compatibility in case an old version of the backend
+	// is being used
+	isPreview := os.Getenv(model.DeprecatedOktetoCurrentDeployBelongsToPreviewEnvVar) == "true" ||
+		os.Getenv(constants.OktetoIsPreviewEnvVar) == "true"
 	// tracking deploy either its been successful or not
 	c.AnalyticsTracker.TrackDeploy(analytics.DeployMetadata{
 		Success:                err == nil,
@@ -622,7 +629,7 @@ func (up *upContext) deployApp(ctx context.Context, ioCtrl *io.Controller, k8slo
 		Duration:               time.Since(startTime),
 		PipelineType:           up.Manifest.Type,
 		DeployType:             "automatic",
-		IsPreview:              os.Getenv(model.OktetoCurrentDeployBelongsToPreview) == "true",
+		IsPreview:              isPreview,
 		HasDependenciesSection: up.Manifest.HasDependenciesSection(),
 		HasBuildSection:        up.Manifest.HasBuildSection(),
 		Err:                    err,
@@ -912,14 +919,14 @@ func (up *upContext) getInsufficientSpaceError(err error) error {
 			E: err,
 			Hint: fmt.Sprintf(`Okteto volume is full.
     Increase your persistent volume size, run '%s' and try 'okteto up' again.
-    More information about configuring your persistent volume at https://okteto.com/docs/reference/manifest/#persistentvolume-object-optional`, utils.GetDownCommand(up.Options.ManifestPathFlag)),
+    More information about configuring your persistent volume at https://okteto.com/docs/reference/okteto-manifest/#persistentvolume-object-optional`, utils.GetDownCommand(up.Options.ManifestPathFlag)),
 		}
 	}
 	return oktetoErrors.UserError{
 		E: err,
 		Hint: `The synchronization service is running out of space.
     Enable persistent volumes in your okteto manifest and try again.
-    More information about configuring your persistent volume at https://okteto.com/docs/reference/manifest/#persistentvolume-object-optional`,
+    More information about configuring your persistent volume at https://okteto.com/docs/reference/okteto-manifest/#persistentvolume-object-optional`,
 	}
 
 }
@@ -1070,7 +1077,7 @@ func printDisplayContext(up *upContext) {
 
 // buildServicesAndSetBuildEnvs get services to build and run build to set build envs
 func buildServicesAndSetBuildEnvs(ctx context.Context, m *model.Manifest, builder builderInterface) error {
-	svcsToBuild, err := builder.GetServicesToBuild(ctx, m, []string{})
+	svcsToBuild, err := builder.GetServicesToBuildDuringDeploy(ctx, m, []string{})
 	if err != nil {
 		return err
 	}

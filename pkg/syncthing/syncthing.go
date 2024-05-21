@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -33,9 +34,11 @@ import (
 	"github.com/google/uuid"
 	"github.com/okteto/okteto/pkg/config"
 	oktetoErrors "github.com/okteto/okteto/pkg/errors"
+	"github.com/okteto/okteto/pkg/filesystem"
 	oktetoLog "github.com/okteto/okteto/pkg/log"
 	"github.com/okteto/okteto/pkg/model"
 	"github.com/shirou/gopsutil/process"
+	"github.com/spf13/afero"
 	"golang.org/x/crypto/bcrypt"
 	yaml "gopkg.in/yaml.v2"
 )
@@ -68,34 +71,43 @@ const (
 	GUIPort = 8384
 
 	maxRetries = 3
+
+	maxLogTailLinesToRead = 5
+
+	// one line of logs in UTF-8 is between 3-400 bytes
+	maxLogTailChunkByteSize int64 = 1024
 )
+
+var regexErrOpeningDatabase = regexp.MustCompile("Error opening database: mkdir .*: no space left on device")
+var regexInsufficientSpace = regexp.MustCompile("insufficient space on disk for database")
 
 // Syncthing represents the local syncthing process.
 type Syncthing struct {
+	Fs               afero.Fs      `yaml:"-"`
 	Client           *http.Client  `yaml:"-"`
 	cmd              *exec.Cmd     `yaml:"-"`
-	Type             string        `yaml:"-"`
-	APIKey           string        `yaml:"apikey"`
-	RemoteDeviceID   string        `yaml:"-"`
+	RescanInterval   string        `yaml:"-"`
+	Home             string        `yaml:"-"`
 	RemoteGUIAddress string        `yaml:"remote"`
 	GUIPassword      string        `yaml:"password"`
 	GUIPasswordHash  string        `yaml:"-"`
 	binPath          string        `yaml:"-"`
 	GUIAddress       string        `yaml:"local"`
-	Home             string        `yaml:"-"`
+	Type             string        `yaml:"-"`
 	LogPath          string        `yaml:"-"`
 	ListenAddress    string        `yaml:"-"`
 	RemoteAddress    string        `yaml:"-"`
-	RescanInterval   string        `yaml:"-"`
+	APIKey           string        `yaml:"apikey"`
 	Compression      string        `yaml:"-"`
+	RemoteDeviceID   string        `yaml:"-"`
 	Folders          []*Folder     `yaml:"folders"`
-	timeout          time.Duration `yaml:"-"`
 	FileWatcherDelay int           `yaml:"-"`
 	RemoteGUIPort    int           `yaml:"-"`
 	RemotePort       int           `yaml:"-"`
 	LocalGUIPort     int           `yaml:"-"`
 	LocalPort        int           `yaml:"-"`
 	pid              int           `yaml:"-"`
+	timeout          time.Duration `yaml:"-"`
 	ForceSendOnly    bool          `yaml:"-"`
 	ResetDatabase    bool          `yaml:"-"`
 	IgnoreDelete     bool          `yaml:"-"`
@@ -163,6 +175,16 @@ type ItemEvent struct {
 	GlobalId int                                        `json:"globalID"`
 }
 
+// SystemError represents a system error in syncthing.
+type SystemError struct {
+	Message string `json:"message"`
+}
+
+// SystemErrors represents a list of system errors
+type SystemErrors struct {
+	Errors []SystemError `json:"errors"`
+}
+
 // Connections represents syncthing connections.
 type Connections struct {
 	Connections map[string]Connection `json:"connections"`
@@ -173,14 +195,15 @@ type Connection struct {
 	Connected bool `json:"connected"`
 }
 
-// DownloadProgressData represents an the information about a DownloadProgress event
+// DownloadProgressData represents the information about a DownloadProgress event
 type DownloadProgressData struct {
 	BytesTotal int64 `json:"bytesTotal"`
 }
 
 // New constructs a new Syncthing.
-func New(dev *model.Dev) (*Syncthing, error) {
+func New(dev *model.Dev, fs afero.Fs) (*Syncthing, error) {
 	fullPath := getInstallPath()
+
 	remotePort, err := model.GetAvailablePort(dev.Interface)
 	if err != nil {
 		return nil, err
@@ -237,6 +260,7 @@ func New(dev *model.Dev) (*Syncthing, error) {
 		RescanInterval:   strconv.Itoa(dev.Sync.RescanInterval),
 		Compression:      compression,
 		timeout:          dev.Timeout.Default,
+		Fs:               fs,
 	}
 	index := 1
 	for _, sync := range dev.Sync.Folders {
@@ -352,6 +376,11 @@ func (s *Syncthing) WaitForPing(ctx context.Context, local bool) error {
 			}
 
 			if time.Now().After(to) && retries > 10 {
+				// before returning a generic error, we try detecting why syncthing is not ready and return a more accurate error
+				errDetected := s.IdentifyReadinessIssue()
+				if errDetected != nil {
+					return errDetected
+				}
 				return fmt.Errorf("syncthing local=%t didn't respond after %s", local, s.timeout.String())
 			}
 
@@ -360,6 +389,34 @@ func (s *Syncthing) WaitForPing(ctx context.Context, local bool) error {
 			return ctx.Err()
 		}
 	}
+}
+
+// IdentifyReadinessIssue attempts to identify the issue that is preventing syncthing from being ready
+func (s *Syncthing) IdentifyReadinessIssue() error {
+	if s.RegexMatchesLogs(regexErrOpeningDatabase) {
+		return oktetoErrors.ErrInsufficientSpaceOnUserDisk
+	}
+	if s.RegexMatchesLogs(regexInsufficientSpace) {
+		return oktetoErrors.ErrInsufficientSpaceOnUserDisk
+	}
+	return nil
+}
+
+// RegexMatchesLogs checks if a regex matches in the syncthing logs
+func (s *Syncthing) RegexMatchesLogs(regx *regexp.Regexp) bool {
+	lines, err := filesystem.GetLastNLines(s.Fs, s.LogPath, maxLogTailLinesToRead, maxLogTailChunkByteSize)
+	if err != nil {
+		oktetoLog.Infof("error reading syncthing log: %s", err)
+		return false
+	}
+
+	for _, log := range lines {
+		if regx.MatchString(log) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // Ping checks if syncthing is available
@@ -745,6 +802,41 @@ func (s *Syncthing) GetFolderErrors(ctx context.Context, local bool) error {
 	return fmt.Errorf("%s: %s", folderErrors.Data.Errors[0].Path, errMsg)
 }
 
+// GetSystemErrors returns the system errors identified by syncthing
+func (s *Syncthing) GetSystemErrors(ctx context.Context, local bool) (*SystemErrors, error) {
+	var sysErrs *SystemErrors
+	body, err := s.APICall(ctx, "rest/system/error", "GET", http.StatusOK, nil, local, nil, true, maxRetries)
+	if err != nil {
+		oktetoLog.Infof("error getting system errors: %s", err.Error())
+		if strings.Contains(err.Error(), "Client.Timeout") {
+			return nil, oktetoErrors.ErrBusySyncthing
+		}
+		return nil, oktetoErrors.ErrLostSyncthing
+	}
+
+	err = json.Unmarshal(body, &sysErrs)
+	if err != nil {
+		oktetoLog.Infof("error unmarshalling system errors: %s", err.Error())
+		return nil, oktetoErrors.ErrLostSyncthing
+	}
+
+	return sysErrs, nil
+}
+
+func (s *Syncthing) IsLocalRunningOutOfSpace(ctx context.Context) bool {
+	sysErrs, err := s.GetSystemErrors(ctx, true)
+	if err != nil {
+		oktetoLog.Infof("error getting system errors: %s", err.Error())
+		return false
+	}
+	for _, sysErr := range sysErrs.Errors {
+		if strings.Contains(sysErr.Message, "insufficient space") {
+			return true
+		}
+	}
+	return false
+}
+
 // GetInSynchronizationFile the files syncthing
 func (s *Syncthing) GetInSynchronizationFile(ctx context.Context) string {
 	events := []ItemEvent{}
@@ -897,8 +989,8 @@ func Load(dev *model.Dev) (*Syncthing, error) {
 }
 
 // RemoveFolder deletes all the files created by the syncthing instance
-func RemoveFolder(dev *model.Dev) error {
-	s, err := New(dev)
+func RemoveFolder(dev *model.Dev, fs afero.Fs) error {
+	s, err := New(dev, fs)
 	if err != nil {
 		return fmt.Errorf("failed to create syncthing instance")
 	}

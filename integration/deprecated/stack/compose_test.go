@@ -41,7 +41,7 @@ const (
       - 8080
       - 8913
   nginx:
-    image: nginx
+    build: nginx
     volumes:
       - ./nginx/nginx.conf:/tmp/nginx.conf
     entrypoint: /bin/bash -c "envsubst < /tmp/nginx.conf > /etc/nginx/conf.d/default.conf && nginx -g 'daemon off;'"
@@ -68,7 +68,7 @@ const (
     environment:
     - RABBITMQ_PASS
   nginx:
-    image: nginx
+    build: nginx
     volumes:
     - ./nginx/nginx.conf:/tmp/nginx.conf
     command: /bin/bash -c "envsubst < /tmp/nginx.conf > /etc/nginx/conf.d/default.conf && nginx -g 'daemon off;'"
@@ -95,6 +95,9 @@ EXPOSE 2931`
     proxy_pass http://$FLASK_SERVER_ADDR;
   }
 }`
+	nginxDockerfile = `FROM nginx
+COPY ./nginx.conf /tmp/nginx.conf
+`
 )
 
 // TestDeployPipelineFromCompose tests the following scenario:
@@ -118,7 +121,6 @@ func TestDeployPipelineFromCompose(t *testing.T) {
 		Token:      token,
 	}
 	require.NoError(t, commands.RunOktetoCreateNamespace(oktetoPath, namespaceOpts))
-	defer commands.RunOktetoDeleteNamespace(oktetoPath, namespaceOpts)
 	require.NoError(t, commands.RunOktetoKubeconfig(oktetoPath, dir))
 	c, _, err := okteto.NewK8sClientProvider().Provide(kubeconfig.Get([]string{filepath.Join(dir, ".kube", "config")}))
 	require.NoError(t, err)
@@ -127,13 +129,14 @@ func TestDeployPipelineFromCompose(t *testing.T) {
 		Workdir:    dir,
 		OktetoHome: dir,
 		Token:      token,
+		Namespace:  testNamespace,
 	}
 	require.NoError(t, commands.RunOktetoStackDeploy(oktetoPath, deployOptions))
 
 	// Test that the nginx image has been created correctly
 	nginxDeployment, err := integration.GetDeployment(context.Background(), testNamespace, "nginx", c)
 	require.NoError(t, err)
-	nginxImageDev := fmt.Sprintf("%s/%s/%s-nginx:okteto-with-volume-mounts", okteto.GetContext().Registry, testNamespace, filepath.Base(dir))
+	nginxImageDev := fmt.Sprintf("%s/%s/%s-nginx:okteto", okteto.GetContext().Registry, testNamespace, filepath.Base(dir))
 	require.Equal(t, getImageWithSHA(nginxImageDev), nginxDeployment.Spec.Template.Spec.Containers[0].Image)
 
 	// Test that the nginx image has been created correctly
@@ -161,6 +164,7 @@ func TestDeployPipelineFromCompose(t *testing.T) {
 		OktetoHome: dir,
 	}
 	require.NoError(t, commands.RunOktetoStackDestroy(oktetoPath, destroyOptions))
+	require.NoError(t, commands.RunOktetoDeleteNamespace(oktetoPath, namespaceOpts))
 }
 
 // TestDeployPipelineFromOktetoStacks tests the following scenario:
@@ -184,7 +188,6 @@ func TestDeployPipelineFromOktetoStacks(t *testing.T) {
 		Token:      token,
 	}
 	require.NoError(t, commands.RunOktetoCreateNamespace(oktetoPath, namespaceOpts))
-	defer commands.RunOktetoDeleteNamespace(oktetoPath, namespaceOpts)
 	require.NoError(t, commands.RunOktetoKubeconfig(oktetoPath, dir))
 	c, _, err := okteto.NewK8sClientProvider().Provide(kubeconfig.Get([]string{filepath.Join(dir, ".kube", "config")}))
 	require.NoError(t, err)
@@ -193,13 +196,14 @@ func TestDeployPipelineFromOktetoStacks(t *testing.T) {
 		Workdir:    dir,
 		OktetoHome: dir,
 		Token:      token,
+		Namespace:  testNamespace,
 	}
 	require.NoError(t, commands.RunOktetoStackDeploy(oktetoPath, deployOptions))
 
 	// Test that the nginx image has been created correctly
 	nginxDeployment, err := integration.GetDeployment(context.Background(), testNamespace, "nginx", c)
 	require.NoError(t, err)
-	nginxImageDev := fmt.Sprintf("%s/%s/%s-nginx:okteto-with-volume-mounts", okteto.GetContext().Registry, testNamespace, filepath.Base(dir))
+	nginxImageDev := fmt.Sprintf("%s/%s/%s-nginx:okteto", okteto.GetContext().Registry, testNamespace, filepath.Base(dir))
 	require.Equal(t, getImageWithSHA(nginxImageDev), nginxDeployment.Spec.Template.Spec.Containers[0].Image)
 
 	// Test that the nginx image has been created correctly
@@ -211,8 +215,10 @@ func TestDeployPipelineFromOktetoStacks(t *testing.T) {
 	destroyOptions := &commands.StackDestroyOptions{
 		Workdir:    dir,
 		OktetoHome: dir,
+		Namespace:  testNamespace,
 	}
 	require.NoError(t, commands.RunOktetoStackDestroy(oktetoPath, destroyOptions))
+	require.NoError(t, commands.RunOktetoDeleteNamespace(oktetoPath, namespaceOpts))
 }
 
 func createStacksScenario(dir string) error {
@@ -223,6 +229,10 @@ func createStacksScenario(dir string) error {
 	nginxPath := filepath.Join(dir, "nginx", "nginx.conf")
 	nginxContent := []byte(nginxConf)
 	if err := os.WriteFile(nginxPath, nginxContent, 0600); err != nil {
+		return err
+	}
+
+	if err := createNginxDockerfile(dir); err != nil {
 		return err
 	}
 
@@ -262,6 +272,15 @@ func createAppDockerfile(dir string) error {
 	return nil
 }
 
+func createNginxDockerfile(dir string) error {
+	nginxDockerfilePath := filepath.Join(dir, "nginx", "Dockerfile")
+	nginxDockerfileContent := []byte(nginxDockerfile)
+	if err := os.WriteFile(nginxDockerfilePath, nginxDockerfileContent, 0600); err != nil {
+		return err
+	}
+	return nil
+}
+
 func createComposeScenario(dir string) error {
 	if err := os.Mkdir(filepath.Join(dir, "nginx"), 0700); err != nil {
 		return err
@@ -270,6 +289,10 @@ func createComposeScenario(dir string) error {
 	nginxPath := filepath.Join(dir, "nginx", "nginx.conf")
 	nginxContent := []byte(nginxConf)
 	if err := os.WriteFile(nginxPath, nginxContent, 0600); err != nil {
+		return err
+	}
+
+	if err := createNginxDockerfile(dir); err != nil {
 		return err
 	}
 

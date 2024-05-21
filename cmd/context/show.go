@@ -31,12 +31,12 @@ func Show() *cobra.Command {
 	var includeToken bool
 	cmd := &cobra.Command{
 		Use:   "show",
-		Args:  utils.NoArgsAccepted("https://okteto.com/docs/reference/cli/#show"),
+		Args:  utils.NoArgsAccepted("https://okteto.com/docs/reference/okteto-cli/#show"),
 		Short: "Print the current context",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := context.Background()
 
-			if err := NewContextCommand().Run(ctx, &Options{raiseNotCtxError: true}); err != nil {
+			if err := NewContextCommand().Run(ctx, &Options{raiseNotCtxError: true, Show: false}); err != nil {
 				return err
 			}
 			ctxStore := okteto.GetContextStore()

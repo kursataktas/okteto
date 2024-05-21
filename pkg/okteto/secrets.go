@@ -22,6 +22,7 @@ import (
 	dockertypes "github.com/docker/cli/cli/config/types"
 	dockercredentials "github.com/docker/docker-credential-helpers/credentials"
 	"github.com/okteto/okteto/pkg/constants"
+	"github.com/okteto/okteto/pkg/env"
 	"github.com/okteto/okteto/pkg/errors"
 	"github.com/okteto/okteto/pkg/types"
 	"github.com/shurcooL/graphql"
@@ -37,23 +38,17 @@ func newUserClient(client graphqlClientInterface) *userClient {
 }
 
 type getContextQuery struct {
-	Cred    credQuery     `graphql:"credentials(space: $cred)"`
-	User    userQuery     `graphql:"user"`
-	Secrets []secretQuery `graphql:"getGitDeploySecrets"`
+	Cred              credQuery        `graphql:"credentials(space: $cred)"`
+	User              userQuery        `graphql:"user"`
+	PlatformVariables []variablesQuery `graphql:"getGitDeploySecrets"`
 }
 
-type getSecretsQuery struct {
-	Secrets []secretQuery `graphql:"getGitDeploySecrets"`
+type getVariablesQuery struct {
+	Variables []variablesQuery `graphql:"getGitDeploySecrets"`
 }
 
 type getContextFileQuery struct {
 	ContextFileJSON string `graphql:"contextFile"`
-}
-
-type getDeprecatedContextQuery struct {
-	User    deprecatedUserQuery `graphql:"user"`
-	Cred    credQuery           `graphql:"credentials(space: $cred)"`
-	Secrets []secretQuery       `graphql:"getGitDeploySecrets"`
 }
 
 type getRegistryCredentialsQuery struct {
@@ -73,25 +68,6 @@ type userQuery struct {
 	GlobalNamespace graphql.String `graphql:"globalNamespace"`
 	New             graphql.Boolean
 	Analytics       graphql.Boolean `graphql:"telemetryEnabled"`
-}
-
-// TODO: Remove this code when users are in okteto chart > 0.10.8
-type deprecatedUserQuery struct {
-	Id          graphql.String
-	Name        graphql.String
-	Namespace   graphql.String
-	Email       graphql.String
-	ExternalID  graphql.String `graphql:"externalID"`
-	Token       graphql.String
-	Registry    graphql.String
-	Buildkit    graphql.String
-	Certificate graphql.String
-	New         graphql.Boolean
-}
-
-type secretQuery struct {
-	Name  graphql.String
-	Value graphql.String
 }
 
 type credQuery struct {
@@ -114,6 +90,11 @@ type metadataQuery struct {
 	Metadata []metadataQueryItem `graphql:"metadata(namespace: $namespace)"`
 }
 
+type variablesQuery struct {
+	Name  graphql.String
+	Value graphql.String
+}
+
 type metadataQueryItem struct {
 	Name  graphql.String
 	Value graphql.String
@@ -125,7 +106,7 @@ type contextFileJSON struct {
 	} `yaml:"contexts"`
 }
 
-// GetSecrets returns the secrets from Okteto API
+// GetContext returns the user context from Okteto API
 func (c *userClient) GetContext(ctx context.Context, ns string) (*types.UserContext, error) {
 	var queryStruct getContextQuery
 	variables := map[string]interface{}{
@@ -133,21 +114,15 @@ func (c *userClient) GetContext(ctx context.Context, ns string) (*types.UserCont
 	}
 	err := query(ctx, &queryStruct, variables, c.client)
 	if err != nil {
-		if strings.Contains(err.Error(), "Cannot query field \"globalNamespace\" on type \"me\"") {
-			return c.deprecatedGetUserContext(ctx)
-		}
-		if strings.Contains(err.Error(), "Cannot query field \"telemetryEnabled\" on type \"me\"") {
-			return c.deprecatedGetUserContext(ctx)
-		}
 		return nil, err
 	}
 
-	secrets := make([]types.Secret, 0)
-	for _, secret := range queryStruct.Secrets {
-		if !strings.Contains(string(secret.Name), ".") {
-			secrets = append(secrets, types.Secret{
-				Name:  string(secret.Name),
-				Value: string(secret.Value),
+	platformVars := make([]env.Var, 0)
+	for _, v := range queryStruct.PlatformVariables {
+		if !strings.Contains(string(v.Name), ".") {
+			platformVars = append(platformVars, env.Var{
+				Name:  string(v.Name),
+				Value: string(v.Value),
 			})
 		}
 	}
@@ -170,7 +145,7 @@ func (c *userClient) GetContext(ctx context.Context, ns string) (*types.UserCont
 			GlobalNamespace: globalNamespace,
 			Analytics:       analytics,
 		},
-		Secrets: secrets,
+		PlatformVariables: platformVars,
 		Credentials: types.Credential{
 			Server:      string(queryStruct.Cred.Server),
 			Certificate: string(queryStruct.Cred.Certificate),
@@ -181,71 +156,25 @@ func (c *userClient) GetContext(ctx context.Context, ns string) (*types.UserCont
 	return result, nil
 }
 
-// GetSecrets returns the secrets from Okteto API
-func (c *userClient) GetUserSecrets(ctx context.Context) ([]types.Secret, error) {
-	var queryStruct getSecretsQuery
+// GetOktetoPlatformVariables returns the user and cluster variables from Okteto API
+func (c *userClient) GetOktetoPlatformVariables(ctx context.Context) ([]env.Var, error) {
+	var queryStruct getVariablesQuery
 	err := query(ctx, &queryStruct, nil, c.client)
 	if err != nil {
 		return nil, err
 	}
 
-	secrets := make([]types.Secret, 0)
-	for _, secret := range queryStruct.Secrets {
-		if !strings.Contains(string(secret.Name), ".") {
-			secrets = append(secrets, types.Secret{
-				Name:  string(secret.Name),
-				Value: string(secret.Value),
+	vars := make([]env.Var, 0)
+	for _, v := range queryStruct.Variables {
+		if !strings.Contains(string(v.Name), ".") {
+			vars = append(vars, env.Var{
+				Name:  string(v.Name),
+				Value: string(v.Value),
 			})
 		}
 	}
 
-	return secrets, nil
-}
-
-// TODO: Remove this code when users are in okteto chart > 0.10.8
-func (c *userClient) deprecatedGetUserContext(ctx context.Context) (*types.UserContext, error) {
-	var queryStruct getDeprecatedContextQuery
-	variables := map[string]interface{}{
-		"cred": graphql.String(""),
-	}
-	err := query(ctx, &queryStruct, variables, c.client)
-	if err != nil {
-		return nil, err
-	}
-
-	secrets := make([]types.Secret, 0)
-	for _, secret := range queryStruct.Secrets {
-		if !strings.Contains(string(secret.Name), ".") {
-			secrets = append(secrets, types.Secret{
-				Name:  string(secret.Name),
-				Value: string(secret.Value),
-			})
-		}
-	}
-	result := &types.UserContext{
-		User: types.User{
-			ID:              string(queryStruct.User.Id),
-			Name:            string(queryStruct.User.Name),
-			Namespace:       string(queryStruct.User.Namespace),
-			Email:           string(queryStruct.User.Email),
-			ExternalID:      string(queryStruct.User.ExternalID),
-			Token:           string(queryStruct.User.Token),
-			New:             bool(queryStruct.User.New),
-			Registry:        string(queryStruct.User.Registry),
-			Buildkit:        string(queryStruct.User.Buildkit),
-			Certificate:     string(queryStruct.User.Certificate),
-			GlobalNamespace: constants.DefaultGlobalNamespace,
-			Analytics:       true,
-		},
-		Secrets: secrets,
-		Credentials: types.Credential{
-			Server:      string(queryStruct.Cred.Server),
-			Certificate: string(queryStruct.Cred.Certificate),
-			Token:       string(queryStruct.Cred.Token),
-			Namespace:   string(queryStruct.Cred.Namespace),
-		},
-	}
-	return result, nil
+	return vars, nil
 }
 
 func (c *userClient) GetClusterCertificate(ctx context.Context, cluster, ns string) ([]byte, error) {

@@ -43,15 +43,25 @@ import (
 	"github.com/spf13/afero"
 )
 
-type analyticsTrackerInterface interface {
-	TrackImageBuild(meta ...*analytics.ImageBuildMetadata)
+type buildTrackerInterface interface {
+	TrackImageBuild(ctx context.Context, meta *analytics.ImageBuildMetadata)
+}
+
+type deployTrackerInterface interface {
+	TrackDeploy(ctx context.Context, name, namespace string, success bool)
+}
+
+type buildDeployTrackerInterface interface {
+	buildTrackerInterface
+	deployTrackerInterface
 }
 
 // Command has all the namespaces subcommands
 type Command struct {
 	manifest          *model.Manifest
 	K8sClientProvider okteto.K8sClientProviderWithLogger
-	AnalyticsTracker  analyticsTrackerInterface
+	AnalyticsTracker  buildTrackerInterface
+	InsightsTracker   buildDeployTrackerInterface
 
 	IoCtrl    *io.Controller
 	K8sLogger *io.K8sLogger
@@ -223,22 +233,25 @@ func (mc *Command) deploy(ctx context.Context, opts *InitOpts) error {
 	if err != nil {
 		return err
 	}
+
+	onBuildFinish := []buildv2.OnBuildFinish{
+		mc.AnalyticsTracker.TrackImageBuild,
+		mc.InsightsTracker.TrackImageBuild,
+	}
 	c := &deploy.Command{
-		GetDeployer:        deploy.GetDeployer,
-		GetManifest:        mc.getManifest,
-		TempKubeconfigFile: deploy.GetTempKubeConfigFile(mc.manifest.Name),
-		K8sClientProvider:  mc.K8sClientProvider,
-		Builder:            buildv2.NewBuilderFromScratch(mc.AnalyticsTracker, mc.IoCtrl),
-		GetExternalControl: deploy.NewDeployExternalK8sControl,
-		Fs:                 afero.NewOsFs(),
-		CfgMapHandler:      deploy.NewConfigmapHandler(mc.K8sClientProvider, mc.K8sLogger),
-		PipelineCMD:        pc,
-		DeployWaiter:       deploy.NewDeployWaiter(mc.K8sClientProvider, mc.K8sLogger),
-		EndpointGetter:     deploy.NewEndpointGetter,
-		IoCtrl:             mc.IoCtrl,
+		GetDeployer:       deploy.GetDeployer,
+		GetManifest:       mc.getManifest,
+		K8sClientProvider: mc.K8sClientProvider,
+		Builder:           buildv2.NewBuilderFromScratch(mc.IoCtrl, onBuildFinish),
+		Fs:                afero.NewOsFs(),
+		CfgMapHandler:     deploy.NewConfigmapHandler(mc.K8sClientProvider, mc.K8sLogger),
+		PipelineCMD:       pc,
+		DeployWaiter:      deploy.NewDeployWaiter(mc.K8sClientProvider, mc.K8sLogger),
+		EndpointGetter:    deploy.NewEndpointGetter,
+		IoCtrl:            mc.IoCtrl,
 	}
 
-	err = c.RunDeploy(ctx, &deploy.Options{
+	err = c.Run(ctx, &deploy.Options{
 		Name:         mc.manifest.Name,
 		ManifestPath: filepath.Join(opts.Workdir, opts.DevPath),
 		Timeout:      5 * time.Minute,
