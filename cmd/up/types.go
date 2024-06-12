@@ -36,7 +36,7 @@ type registryInterface interface {
 }
 
 type builderInterface interface {
-	GetServicesToBuildDuringDeploy(ctx context.Context, manifest *model.Manifest, svcToDeploy []string) ([]string, error)
+	GetServicesToBuildDuringExecution(ctx context.Context, manifest *model.Manifest, svcToDeploy []string) ([]string, error)
 	Build(ctx context.Context, options *types.BuildOptions) error
 	GetBuildEnvVars() map[string]string
 }
@@ -48,7 +48,16 @@ type analyticsTrackerInterface interface {
 }
 
 type buildTrackerInterface interface {
-	TrackImageBuild(context.Context, *analytics.ImageBuildMetadata)
+	TrackImageBuild(ctx context.Context, meta *analytics.ImageBuildMetadata)
+}
+
+type deployTrackerInterface interface {
+	TrackDeploy(ctx context.Context, name, namespace string, success bool)
+}
+
+type buildDeployTrackerInterface interface {
+	buildTrackerInterface
+	deployTrackerInterface
 }
 
 // upContext is the common context of all operations performed during the up command

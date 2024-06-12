@@ -203,6 +203,14 @@ func getSolveOpt(buildOptions *types.BuildOptions, okctx OktetoContextInterface,
 		}
 
 	}
+
+	if buildOptions.LocalOutputPath != "" {
+		opt.Exports = append(opt.Exports, client.ExportEntry{
+			Type:      "local",
+			OutputDir: buildOptions.LocalOutputPath,
+		})
+	}
+
 	for _, cacheFromImage := range buildOptions.CacheFrom {
 		opt.CacheImports = append(
 			opt.CacheImports,
@@ -364,7 +372,7 @@ func solveBuild(ctx context.Context, c *client.Client, opt *client.SolveOpt, pro
 			// We need to wait until the tty channel is closed to avoid writing to stdout while the tty is being used
 			_, err := progressui.DisplaySolveStatus(context.TODO(), c, ioCtrl.Out(), ttyChannel)
 			return err
-		case DeployOutputModeOnBuild, DestroyOutputModeOnBuild:
+		case DeployOutputModeOnBuild, DestroyOutputModeOnBuild, TestOutputModeOnBuild:
 			err := deployDisplayer(context.TODO(), plainChannel, &types.BuildOptions{OutputMode: progress})
 			commandFailChannel <- err
 			return err

@@ -11,22 +11,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package filesystem
+package exec
 
-import (
-	"path/filepath"
-	"strings"
-)
+import "github.com/okteto/okteto/pkg/analytics"
 
-// CleanManifestPath removes the path to the manifest file, in case the command was executed from a parent or child folder
-func CleanManifestPath(manifestPath string) string {
-	lastFolder := filepath.Base(filepath.Dir(manifestPath))
-	if lastFolder == ".okteto" {
-		path := filepath.Clean(manifestPath)
-		parts := strings.Split(path, string(filepath.Separator))
+// mixpannelTrack represents a track to be sent to mixpannel
+type mixpannelTrack struct {
+	trackFunc func(m *analytics.TrackExecMetadata)
+}
 
-		return filepath.Join(parts[len(parts)-2:]...)
-	} else {
-		return filepath.Base(manifestPath)
-	}
+// TrackExec sends the track to mixpannel
+func (t *mixpannelTrack) Track(metadata *analytics.TrackExecMetadata) {
+	t.trackFunc(metadata)
 }

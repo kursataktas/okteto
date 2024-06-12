@@ -126,7 +126,7 @@ func NewBuilderFromScratch(ioCtrl *io.Controller, onBuildFinish []OnBuildFinish)
 	if err != nil {
 		ioCtrl.Logger().Infof("could not get working dir: %s", err)
 	}
-	topLevelGitDir, err := repository.FindTopLevelGitDir(wd, afero.NewOsFs())
+	topLevelGitDir, err := repository.FindTopLevelGitDir(wd)
 	if err != nil {
 		ioCtrl.Logger().Infof("could not get top level git dir: %s", err)
 	}
@@ -170,11 +170,11 @@ func (ob *OktetoBuilder) Build(ctx context.Context, options *types.BuildOptions)
 		return nil
 	}
 	if options.File != "" {
-		workdir := model.GetWorkdirFromManifestPath(options.File)
+		workdir := filesystem.GetWorkdirFromManifestPath(options.File)
 		if err := os.Chdir(workdir); err != nil {
 			return err
 		}
-		options.File = model.GetManifestPathFromWorkdir(options.File, workdir)
+		options.File = filesystem.GetManifestPathFromWorkdir(options.File, workdir)
 	}
 	if options.Manifest.Name == "" {
 		wd, err := os.Getwd()

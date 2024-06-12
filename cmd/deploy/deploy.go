@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -37,6 +38,7 @@ import (
 	"github.com/okteto/okteto/pkg/divert"
 	"github.com/okteto/okteto/pkg/env"
 	oktetoErrors "github.com/okteto/okteto/pkg/errors"
+	"github.com/okteto/okteto/pkg/filesystem"
 	"github.com/okteto/okteto/pkg/format"
 	"github.com/okteto/okteto/pkg/k8s/ingresses"
 	oktetoLog "github.com/okteto/okteto/pkg/log"
@@ -46,6 +48,7 @@ import (
 	oktetoPath "github.com/okteto/okteto/pkg/path"
 	"github.com/okteto/okteto/pkg/repository"
 	"github.com/okteto/okteto/pkg/types"
+	"github.com/okteto/okteto/pkg/validator"
 	"github.com/spf13/afero"
 	"github.com/spf13/cobra"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -87,7 +90,7 @@ type Options struct {
 
 type builderInterface interface {
 	Build(ctx context.Context, options *types.BuildOptions) error
-	GetServicesToBuildDuringDeploy(ctx context.Context, manifest *model.Manifest, svcsToDeploy []string) ([]string, error)
+	GetServicesToBuildDuringExecution(ctx context.Context, manifest *model.Manifest, svcsToDeploy []string) ([]string, error)
 	GetBuildEnvVars() map[string]string
 }
 
@@ -117,7 +120,7 @@ type Command struct {
 	AnalyticsTracker  AnalyticsTrackerInterface
 	IoCtrl            *io.Controller
 	K8sLogger         *io.K8sLogger
-	insightsTracker   buildDeployTrackerInterface
+	InsightsTracker   buildDeployTrackerInterface
 
 	PipelineType model.Archetype
 	// onCleanUp is a list of functions to be executed when the execution is interrupted. This is a hack
@@ -237,7 +240,7 @@ func Deploy(ctx context.Context, at AnalyticsTrackerInterface, insightsTracker b
 				K8sLogger:          k8sLogger,
 
 				onCleanUp:       []cleanUpFunc{},
-				insightsTracker: insightsTracker,
+				InsightsTracker: insightsTracker,
 			}
 			startTime := time.Now()
 
@@ -251,7 +254,7 @@ func Deploy(ctx context.Context, at AnalyticsTrackerInterface, insightsTracker b
 				if options.Manifest != nil {
 					namespace = options.Manifest.Namespace
 				}
-				c.insightsTracker.TrackDeploy(ctx, options.Name, namespace, err == nil)
+				c.InsightsTracker.TrackDeploy(ctx, options.Name, namespace, err == nil)
 				c.TrackDeploy(options.Manifest, options.RunInRemote, startTime, err)
 				exit <- err
 			}()
@@ -287,6 +290,29 @@ func Deploy(ctx context.Context, at AnalyticsTrackerInterface, insightsTracker b
 	return cmd
 }
 
+// calculateManifestPathToBeStored calculates the manifest path that has to be stored in the config map for UI operations.
+// It calculates the absolute path from the received path and then, it gets the relative path the top level git dir (repo root)
+func (dc *Command) calculateManifestPathToBeStored(topLevelGitDir, manifestPath string) string {
+	absoluteManifestPath, err := filepath.Abs(manifestPath)
+	if err != nil {
+		dc.IoCtrl.Logger().Debugf("failed to get absolute path for manifest path %q: %s", manifestPath, err)
+		return ""
+	}
+	manifestPathForConfigMap, err := filepath.Rel(topLevelGitDir, absoluteManifestPath)
+	if err != nil {
+		dc.IoCtrl.Logger().Infof("failed to get relative path for manifest path %q from the repository dir %q: %s", absoluteManifestPath, topLevelGitDir, err)
+		return ""
+	}
+
+	// If the relative path to the repository contains "..", it means the manifest path is not within the
+	// repository, so it should not be stored in the config map
+	if strings.Contains(manifestPathForConfigMap, "..") {
+		return ""
+	}
+
+	return manifestPathForConfigMap
+}
+
 // Run runs the deploy sequence
 func (dc *Command) Run(ctx context.Context, deployOptions *Options) error {
 	oktetoLog.SetStage("Load manifest")
@@ -318,12 +344,13 @@ func (dc *Command) Run(ctx context.Context, deployOptions *Options) error {
 		return fmt.Errorf("failed to get the current working directory: %w", err)
 	}
 
-	topLevelGitDir, err := repository.FindTopLevelGitDir(cwd, dc.Fs)
+	topLevelGitDir, err := repository.FindTopLevelGitDir(cwd)
 	if err != nil {
-		oktetoLog.Warning("Repository not detected: the env vars '%s' and '%s' might not be available: %s.\n    For more information, check out: https://www.okteto.com/docs/core/okteto-variables/#default-environment-variables", constants.OktetoGitBranchEnvVar, constants.OktetoGitCommitEnvVar, err.Error())
+		oktetoLog.Warning("Repository not detected: the env vars '%s' and '%s' might not be available.\n    For more information, check out: https://www.okteto.com/docs/core/okteto-variables/#default-environment-variables", constants.OktetoGitBranchEnvVar, constants.OktetoGitCommitEnvVar)
 	}
 
 	if topLevelGitDir != "" {
+		dc.IoCtrl.Logger().Debugf("repository detected at %s", topLevelGitDir)
 		dc.addEnvVars(topLevelGitDir)
 	} else {
 		dc.addEnvVars(cwd)
@@ -346,12 +373,34 @@ func (dc *Command) Run(ctx context.Context, deployOptions *Options) error {
 		}
 	}
 
+	// This is the manifest path to be stored in the config map. It should be relative to the repository root, so next operations
+	// triggered from the UI would take the correct manifest. So, it is calculated from the topLevelGitDir and the absolute path
+	// of the manifest file.
+	// Having the following structure:
+	// root-repo
+	// |- dirA
+	//   |- dirB
+	//    |- okteto.yml
+	// If the command executed is okteto deploy from "dirB", we should store the manifest path as "dirA/dirB/okteto.yml"
+	// NOTE: This is only stored if ManifestPathFlag (-f options) is passed
+	manifestPathForConfigMap := ""
+	if topLevelGitDir != "" && deployOptions.ManifestPathFlag != "" {
+		// If deployOptions.ManifestPath is set, means that we have changed the working directory to the one storing the manifest, so we need to take the absolute path from ManifestPath
+		// as the original deployOptions.ManifestPathFlag wouldn't build the right path if we get the absolute one
+		if deployOptions.ManifestPath != "" {
+			manifestPathForConfigMap = dc.calculateManifestPathToBeStored(topLevelGitDir, deployOptions.ManifestPath)
+		} else {
+			manifestPathForConfigMap = dc.calculateManifestPathToBeStored(topLevelGitDir, deployOptions.ManifestPathFlag)
+		}
+	}
+
+	dc.IoCtrl.Logger().Debugf("manifest path to store in metadata: %q", manifestPathForConfigMap)
 	data := &pipeline.CfgData{
 		Name:       deployOptions.Name,
 		Namespace:  deployOptions.Manifest.Namespace,
 		Repository: os.Getenv(model.GithubRepositoryEnvVar),
 		Branch:     os.Getenv(constants.OktetoGitBranchEnvVar),
-		Filename:   deployOptions.ManifestPathFlag,
+		Filename:   manifestPathForConfigMap,
 		Status:     pipeline.ProgressingStatus,
 		Manifest:   deployOptions.Manifest.Manifest,
 		Icon:       deployOptions.Manifest.Icon,
@@ -593,6 +642,11 @@ func (dc *Command) deployDependencies(ctx context.Context, deployOptions *Option
 	for depName, dep := range deployOptions.Manifest.Dependencies {
 		oktetoLog.Information("Deploying dependency  '%s'", depName)
 		oktetoLog.SetStage(fmt.Sprintf("Deploying dependency %s", depName))
+
+		if err := validator.CheckReservedVarName(dep.Variables); err != nil {
+			return err
+		}
+
 		dep.Variables = append(dep.Variables, env.Var{
 			Name:  "OKTETO_ORIGIN",
 			Value: "okteto-deploy",
@@ -793,7 +847,7 @@ func checkOktetoManifestPathFlag(options *Options, fs afero.Fs) error {
 		options.ManifestPathFlag = manifestPathFlag
 
 		// when the manifest path is set by the cmd flag, we are moving cwd so the cmd is executed from that dir
-		uptManifestPath, err := model.UpdateCWDtoManifestPath(options.ManifestPath)
+		uptManifestPath, err := filesystem.UpdateCWDtoManifestPath(options.ManifestPath)
 		if err != nil {
 			return err
 		}
